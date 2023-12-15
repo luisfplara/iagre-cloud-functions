@@ -148,7 +148,6 @@ app.post('/new', async (req, res) => {
   const message = receivedData.text.message
   const user_wpp_interactions_collection = firestore.collection('user_wpp_interaction')
   const user_wpp_interactions_ref = await user_wpp_interactions_collection.where('phone_number', '==', receivedData.phone).get();
-
   const user_wpp_interactions = user_wpp_interactions_ref.empty ? await registryUserInteraction(receivedData) : user_wpp_interactions_ref.docs.at(0).ref
 
   user_wpp_interactions.update({ last_message_time: receivedData.momment })
@@ -158,7 +157,7 @@ app.post('/new', async (req, res) => {
 
   //console.log('user_wpp_interactions ====> ', last_conversation_session)
   if (last_conversation_session == 0) {
-    const new_session = await user_wpp_interactions.collection('message_session').add({ messages: [{ role: 'user', content: message }], active: true });
+    const new_session = await user_wpp_interactions.collection('message_session').add({ messages: [{ role: 'user', content: message }], active: true, last_message_time: receivedData.momment });
     console.log('new_sessionnew_session', new_session)
     user_wpp_interactions.update({ last_session: new_session })
   } else {
@@ -166,9 +165,9 @@ app.post('/new', async (req, res) => {
     console.log('last_conversation_session_ref.data().active', last_conversation_session_ref.data())
 
     if (!last_conversation_session_ref.data()) {
-      const new_session = await user_wpp_interactions.collection('message_session').add({ messages: [{ role: 'user', content: message }], active: true });
+      const new_session = await user_wpp_interactions.collection('message_session').add({ messages: [{ role: 'user', content: message }], active: true, last_message_time: receivedData.momment });
       user_wpp_interactions.update({ last_session: new_session })
-      res.send({ 'status': 'aasdasd' })
+      res.send({ 'status': 'create new message_session' })
       return
     }
 
@@ -178,12 +177,12 @@ app.post('/new', async (req, res) => {
 
 
       message_session.push({ role: 'user', content: message })
-      last_conversation_session.update({ messages: message_session })
+      last_conversation_session.update({ messages: message_session, last_message_time: receivedData.momment })
 
 
       console.log(message_session)
     } else {
-      const new_session = last_conversation_session_ref = await user_wpp_interactions.collection('message_session').add({ messages: [{ role: 'user', content: message }], active: true });
+      const new_session = await user_wpp_interactions.collection('message_session').add({ messages: [{ role: 'user', content: message }], active: true, last_message_time: receivedData.momment });
 
       user_wpp_interactions.update({ last_session: new_session })
     }
@@ -191,7 +190,7 @@ app.post('/new', async (req, res) => {
   }
 
 
-  res.send({ 'status': 'ok' })
+  res.send({ 'status': 'message registered to session' })
 
 });
 
@@ -216,37 +215,41 @@ exports.wppReceivedMessageGateway = functions.region('southamerica-east1').
 const OpenAI = require("openai");
 
 
+var initial_prompt = [{ "role": "system", "content": "Você é o Iago, um especialista em gestão financeira no Agronegócio. Pequenos e médios produtores são os seus clientes, você sabe tudo sobre notas fiscais, boletos, safras e como otimizar os ganhos com uma boa gestão financeira, você tem acesso as notas e boletos do produtor através de uma API. " }]
+
+
 exports.wppIagoAgent = functions.region('southamerica-east1').
   runWith({
     memory: '128MB'
-  }).firestore.document("user_wpp_interaction/{user_wpp_interaction_id}/message_history/{message_history_id}").onCreate(async (event) => {
-    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const data = event.data();
-    console.log("data ", data)
-    const message_history = event.ref.parent;
-
-    console.log('paret data', (await message_history.parent.get()).data())
-    var messages = [{ "role": "system", "content": "Você é o Iago, um especialista em gestão financeira no Agronegócio. Pequenos e médios produtores são os seus clientes, você sabe tudo sobre notas fiscais, boletos, safras e como otimizar os ganhos com uma boa gestão financeira, você tem acesso as notas e boletos do produtor através de uma API. " }]
+  }).firestore.document("user_wpp_interaction/{user_wpp_interaction_id}/message_session/{message_session_id}").onWrite(async (event) => {
 
 
+    console.log('event.after.data().messages ', event.after.data().messages.length, ' \n event.before.data().messages ', ( event.before.data()?.messages.length||0))
+    //check if the message[] changed
+    if (event.after.data().messages.length >( event.before.data()?.messages.length||0)) {
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      console.log("event ", event, '\n')
+      const new_message = event.after
+      console.log("data ", new_message.data(), '\n')
 
-    if (data.received) {
+      const message_session = new_message.data().messages
+      const last_message = message_session[message_session.length - 1]
+      console.log('message_session ', message_session, '\n')
+      console.log('last_message ', last_message, '\n')
 
-      messages.push({ "role": "user", "content": data.received.text.message })
+      if (last_message.role == "user") {
+        const message = initial_prompt.concat(message_session)
 
-
-      const completion = await openai.chat.completions.create({
-        messages: messages,
-        model: "gpt-4-0613",
-      });
-      //console.log(completion.choices[0])adasd
-      const now = Date.now()
-      const aux = message_history.add({ sent: { text: { message: completion.choices[0].message.content } }, time: now, session: data.session })
-
-      messages.push(completion.choices[0].message)
-
-
+        console.log("message ", message, '\n')
+        console.log("message len", message.length, '\n')
+        
+              const completion = await openai.chat.completions.create({
+                messages: message,
+                model: "gpt-4-0613",
+              });
+              //console.log(completion.choices[0])adasd
+              const now = Date.now()
+              const aux = new_message.ref.update({ messages:  message_session.concat(completion.choices[0].message), last_message_time: now})
+      }
     }
-    // console.log('messages______________________\n', messages, '\nmessages______________________\n')
-
   });
