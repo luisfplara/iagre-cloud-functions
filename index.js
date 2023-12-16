@@ -218,38 +218,146 @@ const OpenAI = require("openai");
 var initial_prompt = [{ "role": "system", "content": "Você é o Iago, um especialista em gestão financeira no Agronegócio. Pequenos e médios produtores são os seus clientes, você sabe tudo sobre notas fiscais, boletos, safras e como otimizar os ganhos com uma boa gestão financeira, você tem acesso as notas e boletos do produtor através de uma API. " }]
 
 
+
+
+function closeConversation(session_ref) {
+  console.log("chamou função")
+
+  session_ref.ref.update({ active: false })
+
+  return ('sucess')
+}
+
+async function getInvoices(cpf_cnpj) {
+  const invoices = await firestore.collection('invoice').where('cnpj_addressee', '==', cpf_cnpj).get()
+
+  //sessio_ref.ref.update({ active: false })
+
+
+  var result = []
+  for (const invoice of  invoices.docs) {
+    result.push(invoice.data())
+  }
+console.log('resultresultresultresult', result)
+  return JSON.stringify(result)
+}
+
+async function getUserInformation(phone_number) {
+
+  const user = await firestore.collection('user').where('phone_number', '==', phone_number).get()
+
+  return user.docs.at(0).data()
+}
+
+const tools = [
+  {
+    type: "function",
+    function: {
+      name: "close_conversation_session",
+      description: "quando o cliente entra em contato para solicitar algo, uma sessão de atendimento é criada, quando a solicitação do cliente estiver completa, essa função deve ser chamada para finalizar a sessão de atendimento",
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_user_invoices_information",
+      description: "quando o cliente solicitar informações a respeito de suas notas fiscais, você deve realizar uma chamada a esse endpoint para obter as informações",
+    },
+  }
+];
+
 exports.wppIagoAgent = functions.region('southamerica-east1').
   runWith({
     memory: '128MB'
   }).firestore.document("user_wpp_interaction/{user_wpp_interaction_id}/message_session/{message_session_id}").onWrite(async (event) => {
+    const user_wpp_interaction = await event.after.ref.parent.parent.get()
+
+    //console.log('user_wpp_inte raction --------> ', user_wpp_interaction.data().phone_number)
 
 
-    console.log('event.after.data().messages ', event.after.data().messages.length, ' \n event.before.data().messages ', ( event.before.data()?.messages.length||0))
+    const  user = await getUserInformation(user_wpp_interaction.data().phone_number)
+
+      //console.log('user  --------> ', user)
+
+      //const  invoice = await getInvoices('78330700178')
+
+     // console.log('getInvoices  --------> ', invoice)
+    // console.log('event.after.data().messages ', event.after.data().messages.length, ' \n event.before.data().messages ', (event.before.data()?.messages.length || 0))
     //check if the message[] changed
-    if (event.after.data().messages.length >( event.before.data()?.messages.length||0)) {
+  
+    if (event.after.data().messages.length > (event.before.data()?.messages.length || 0)) {
       const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      console.log("event ", event, '\n')
+      //console.log("event ", event, '\n')
       const new_message = event.after
-      console.log("data ", new_message.data(), '\n')
+     // console.log("data ", new_message.data(), '\n')
 
       const message_session = new_message.data().messages
       const last_message = message_session[message_session.length - 1]
-      console.log('message_session ', message_session, '\n')
-      console.log('last_message ', last_message, '\n')
+      //console.log('message_session ', message_session, '\n')
+      //console.log('last_message ', last_message, '\n')
 
       if (last_message.role == "user") {
         const message = initial_prompt.concat(message_session)
 
-        console.log("message ", message, '\n')
-        console.log("message len", message.length, '\n')
-        
-              const completion = await openai.chat.completions.create({
-                messages: message,
-                model: "gpt-4-0613",
-              });
-              //console.log(completion.choices[0])adasd
-              const now = Date.now()
-              const aux = new_message.ref.update({ messages:  message_session.concat(completion.choices[0].message), last_message_time: now})
+        //console.log("message ", message, '\n')
+       // console.log("message len", message.length, '\n')
+
+        const completion = await openai.chat.completions.create({
+          messages: message,
+          model: "gpt-4-0613",
+          tools: tools,
+          tool_choice: "auto",
+        });
+        //console.log(completion.choices[0])adasd
+        var responseMessage = completion.choices[0].message
+        const toolCalls = responseMessage.tool_calls;
+        if (responseMessage.tool_calls) {
+          // Step 3: call the function
+          // Note: the JSON response may not always be valid; be sure to handle errors
+          const availableFunctions = {
+            close_conversation_session: closeConversation,
+            get_user_invoices_information: getInvoices
+          }; // only one function in this example, but you can have multiple
+          message.push(responseMessage); // extend conversation with assistant's reply
+          for (const toolCall of toolCalls) {
+            const functionName = toolCall.function.name;
+            const functionToCall = availableFunctions[functionName];
+            const functionArgs = JSON.parse(toolCall.function.arguments);
+            var  functionResponse;
+            switch (functionName) {
+              case 'close_conversation_session':
+                functionResponse = functionToCall(
+                  new_message
+                );
+                break;
+              case 'get_user_invoices_information':
+                functionResponse = await functionToCall(
+                  user.user_information.cnpj||user.user_information.cpf
+                );
+
+            }
+            
+            
+            message.push({
+              tool_call_id: toolCall.id,
+              role: "tool",
+              name: functionName,
+              content: functionResponse,
+            }); // extend conversation with function response
+          }
+          console.log('messagemessagemessagemessage ----> ',message)
+          const secondResponse = await openai.chat.completions.create({
+            messages: message,
+            model: "gpt-4-0613",
+            tools: tools,
+            tool_choice: "auto",
+          }); // get a new response from the model where it can see the function response
+          responseMessage =  secondResponse.choices[0].message;
+        }
+
+        const now = Date.now()
+        const aux = new_message.ref.update({ messages: message_session.concat(responseMessage), last_message_time: now })
       }
     }
+    
   });
